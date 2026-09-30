@@ -11,6 +11,8 @@ npm install
 npm run dev          # http://localhost:4317
 ```
 
+Node.js 20.9 ou plus récent est requis. Si la page reste blanche ou charge sans fin, un autre programme occupe sans doute le port 4317 (c'est aussi le port par défaut d'OpenTelemetry, utilisé par certains conteneurs Docker ou par le tableau de bord .NET Aspire) : lancez `npx next dev -p 4318` et ouvrez `http://localhost:4318`.
+
 `http://localhost:4317` ouvre la scène de démo : simulateur, téléphone de la cliente et poste conseiller côte à côte. `/customer` et `/agent` ouvrent chaque vue seule, pour mettre le téléphone sur un vrai GSM et le poste conseiller sur un second écran. Toutes les vues partagent un même état en mémoire, interrogé toutes les 900 ms.
 
 `npm run verify` rejoue les trois parcours, l'appel vocal, les contrôles de vie privée et les frontières TTS/STT contre le serveur lancé (`MEE_URL` change l'URL).
@@ -84,6 +86,8 @@ There is no LLM anywhere. Recognition is deterministic rules. Every word Mee say
 npm install
 npm run dev          # http://localhost:4317
 ```
+
+Requires Node.js 20.9 or newer. If the page stays blank or keeps loading, another program probably holds port 4317 (it is also the default OpenTelemetry port, used by some Docker containers and the .NET Aspire dashboard): run `npx next dev -p 4318` and open `http://localhost:4318`.
 
 `/` is the demo stage (simulator, customer phone, agent desk). `/customer` and `/agent` open each view on its own. `npm run verify` runs the end-to-end checks against the running server. The UI defaults to French; the FR · NL · EN toggle switches all copy and scripts.
 
