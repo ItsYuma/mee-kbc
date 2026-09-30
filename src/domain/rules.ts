@@ -1,10 +1,15 @@
-import type { Lang, Signal, SignalType, SituationType } from "./types";
+import type { Lang, Localized, Signal, SignalType, SituationType } from "./types";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
 export const BUFFER_THRESHOLD_EUR = 150;
+export const HOME_COUNTRY = "BE";
+
+export type FactIcon = "merchant" | "amount" | "code" | "card" | "place" | "salary" | "balance" | "muted" | "clean";
+export type Fact = { icon: FactIcon; text: string };
+export type Slots = Record<string, string>;
 
 export type Rule = {
   situationType: SituationType;
@@ -14,12 +19,20 @@ export type Rule = {
   dismissCooldownMs: number;
   resolvesOn: SignalType[];
   match: (recent: Signal[]) => Signal[] | null;
-  explain: (matched: Signal[], lang: Lang) => string;
-  knownFacts: (matched: Signal[], lang: Lang) => string[];
+  slots: (matched: Signal[], lang: Lang) => Slots;
+  explain: Localized;
+  facts: Record<Lang, (s: Slots) => Fact[]>;
 };
 
-const eur = (n: number, lang: Lang) =>
-  new Intl.NumberFormat(lang === "nl" ? "nl-BE" : "en-BE", { style: "currency", currency: "EUR" }).format(n);
+const LOCALE: Record<Lang, string> = { nl: "nl-BE", fr: "fr-BE", en: "en-BE" };
+
+export const eur = (n: number, lang: Lang) => new Intl.NumberFormat(LOCALE[lang], { style: "currency", currency: "EUR" }).format(n);
+
+export const countryName = (code: string, lang: Lang) => new Intl.DisplayNames([LOCALE[lang]], { type: "region" }).of(code) ?? code;
+
+export function fill(template: string, slots: Slots): string {
+  return template.replace(/\{(\w+)\}/g, (_, k: string) => slots[k] ?? `{${k}}`);
+}
 
 const ofType = <T extends SignalType>(signals: Signal[], type: T) =>
   signals.filter((s): s is Extract<Signal, { type: T }> => s.type === type);
@@ -40,28 +53,88 @@ export const RULES: Record<SituationType, Rule> = {
       const declines = ofType(recent, "payment_declined");
       return declines.length >= 2 ? declines.slice(-2) : null;
     },
-    explain: (matched, lang) => {
+    slots: (matched, lang) => {
       const [first, last] = ofType(matched, "payment_declined");
-      const mins = minutesBetween(first, last);
-      return lang === "nl"
-        ? `Je Bancontact-betaling bij ${last.payload.merchant} werd ${matched.length} keer geweigerd binnen ${mins} min. Daarom tonen we één snelle oplossing.`
-        : `Your Bancontact payment at ${last.payload.merchant} was declined ${matched.length} times within ${mins} min. So we're showing one quick fix.`;
+      return {
+        merchant: last.payload.merchant,
+        city: last.payload.city,
+        amount: eur(last.payload.amountEur, lang),
+        count: String(matched.length),
+        minutes: String(minutesBetween(first, last)),
+        code: last.payload.code,
+      };
     },
-    knownFacts: (matched, lang) => {
-      const last = latest(ofType(matched, "payment_declined"))!;
-      return lang === "nl"
-        ? [
-            `Handelaar: ${last.payload.merchant}, ${last.payload.city}`,
-            `Bedrag: ${eur(last.payload.amountEur, lang)}`,
-            `Weigeringscode: ${last.payload.code} (contactloze limiet bereikt)`,
-            `Kaart: Bancontact •• 4821, niet geblokkeerd`,
-          ]
-        : [
-            `Merchant: ${last.payload.merchant}, ${last.payload.city}`,
-            `Amount: ${eur(last.payload.amountEur, lang)}`,
-            `Decline code: ${last.payload.code} (contactless limit reached)`,
-            `Card: Bancontact •• 4821, not blocked`,
-          ];
+    explain: {
+      en: "Your Bancontact payment at {merchant} was declined {count} times within {minutes} min. So we're showing one quick fix.",
+      nl: "Je Bancontact-betaling bij {merchant} werd {count} keer geweigerd binnen {minutes} min. Daarom tonen we één snelle oplossing.",
+      fr: "Votre paiement Bancontact chez {merchant} a été refusé {count} fois en {minutes} min. Nous vous proposons donc une solution rapide.",
+    },
+    facts: {
+      en: (s) => [
+        { icon: "merchant", text: `${s.merchant}, ${s.city}` },
+        { icon: "amount", text: s.amount },
+        { icon: "code", text: `Code ${s.code} · contactless limit reached` },
+        { icon: "card", text: "Bancontact •• 4821 · not blocked" },
+      ],
+      nl: (s) => [
+        { icon: "merchant", text: `${s.merchant}, ${s.city}` },
+        { icon: "amount", text: s.amount },
+        { icon: "code", text: `Code ${s.code} · contactloze limiet bereikt` },
+        { icon: "card", text: "Bancontact •• 4821 · niet geblokkeerd" },
+      ],
+      fr: (s) => [
+        { icon: "merchant", text: `${s.merchant}, ${s.city}` },
+        { icon: "amount", text: s.amount },
+        { icon: "code", text: `Code ${s.code} · plafond sans contact atteint` },
+        { icon: "card", text: "Bancontact •• 4821 · non bloquée" },
+      ],
+    },
+  },
+  card_blocked_abroad: {
+    situationType: "card_blocked_abroad",
+    name: "R-CRD-03 · card blocked outside Belgium",
+    windowMs: 2 * HOUR,
+    ttlMs: 6 * HOUR,
+    dismissCooldownMs: 1 * HOUR,
+    resolvesOn: ["card_unblocked"],
+    match: (recent) => {
+      const block = latest(ofType(recent, "card_blocked"));
+      return block && block.payload.countryCode !== HOME_COUNTRY ? [block] : null;
+    },
+    slots: (matched, lang) => {
+      const block = latest(ofType(matched, "card_blocked"))!;
+      return {
+        card: block.payload.card,
+        merchant: block.payload.merchant,
+        amount: eur(block.payload.amountEur, lang),
+        city: block.payload.city,
+        country: countryName(block.payload.countryCode, lang),
+      };
+    },
+    explain: {
+      en: "Your card {card} was paused after a payment of {amount} at {merchant} in {city}, {country}, far from where you usually pay.",
+      nl: "Je kaart {card} werd gepauzeerd na een betaling van {amount} bij {merchant} in {city}, {country}, ver van waar je normaal betaalt.",
+      fr: "Votre carte {card} a été suspendue après un paiement de {amount} chez {merchant} à {city}, {country}, loin de vos habitudes.",
+    },
+    facts: {
+      en: (s) => [
+        { icon: "place", text: `${s.city}, ${s.country}` },
+        { icon: "card", text: `Debit card ${s.card} · blocked by safety rule` },
+        { icon: "merchant", text: `${s.merchant} · ${s.amount}` },
+        { icon: "clean", text: "No fraud reported before the block" },
+      ],
+      nl: (s) => [
+        { icon: "place", text: `${s.city}, ${s.country}` },
+        { icon: "card", text: `Debetkaart ${s.card} · geblokkeerd door veiligheidsregel` },
+        { icon: "merchant", text: `${s.merchant} · ${s.amount}` },
+        { icon: "clean", text: "Geen fraude gemeld vóór de blokkering" },
+      ],
+      fr: (s) => [
+        { icon: "place", text: `${s.city}, ${s.country}` },
+        { icon: "card", text: `Carte de débit ${s.card} · bloquée par règle de sécurité` },
+        { icon: "merchant", text: `${s.merchant} · ${s.amount}` },
+        { icon: "clean", text: "Aucune fraude signalée avant le blocage" },
+      ],
     },
   },
   cash_stress: {
@@ -80,35 +153,51 @@ export const RULES: Record<SituationType, Rule> = {
       if (!(salary.timestamp <= rent.timestamp && rent.timestamp <= low.timestamp)) return null;
       return [salary, rent, low];
     },
-    explain: (matched, lang) => {
+    slots: (matched, lang) => {
       const salary = latest(ofType(matched, "salary_received"))!;
       const rent = latest(ofType(matched, "rent_paid"))!;
       const low = latest(ofType(matched, "balance_low"))!;
-      return lang === "nl"
-        ? `Je loon (${eur(salary.payload.amountEur, lang)}) kwam binnen, je huur (${eur(rent.payload.amountEur, lang)}) ging eraf, en je saldo staat nu op ${eur(low.payload.balanceEur, lang)}, onder de ${eur(BUFFER_THRESHOLD_EUR, lang)}.`
-        : `Your salary (${eur(salary.payload.amountEur, lang)}) came in, your rent (${eur(rent.payload.amountEur, lang)}) went out, and your balance is now ${eur(low.payload.balanceEur, lang)}, below ${eur(BUFFER_THRESHOLD_EUR, lang)}.`;
+      return {
+        employer: salary.payload.employer,
+        salary: eur(salary.payload.amountEur, lang),
+        rent: eur(rent.payload.amountEur, lang),
+        balance: eur(low.payload.balanceEur, lang),
+        threshold: eur(BUFFER_THRESHOLD_EUR, lang),
+      };
     },
-    knownFacts: (matched, lang) => {
-      const salary = latest(ofType(matched, "salary_received"))!;
-      const low = latest(ofType(matched, "balance_low"))!;
-      return lang === "nl"
-        ? [
-            `Loon van ${salary.payload.employer}: ${eur(salary.payload.amountEur, lang)}`,
-            `Saldo nu: ${eur(low.payload.balanceEur, lang)}`,
-            `Marketing gedempt voor 72 u`,
-            `Geen lopende klachten of claims`,
-          ]
-        : [
-            `Salary from ${salary.payload.employer}: ${eur(salary.payload.amountEur, lang)}`,
-            `Balance now: ${eur(low.payload.balanceEur, lang)}`,
-            `Marketing muted for 72h`,
-            `No open complaints or claims`,
-          ];
+    explain: {
+      en: "Your salary ({salary}) came in, your rent ({rent}) went out, and your balance is now {balance}, below {threshold}.",
+      nl: "Je loon ({salary}) kwam binnen, je huur ({rent}) ging eraf, en je saldo staat nu op {balance}, onder de {threshold}.",
+      fr: "Votre salaire ({salary}) est arrivé, votre loyer ({rent}) est parti, et votre solde est maintenant de {balance}, sous les {threshold}.",
+    },
+    facts: {
+      en: (s) => [
+        { icon: "salary", text: `Salary from ${s.employer}: ${s.salary}` },
+        { icon: "balance", text: `Balance now: ${s.balance}` },
+        { icon: "muted", text: "Marketing muted for 72h" },
+        { icon: "clean", text: "No open complaints or claims" },
+      ],
+      nl: (s) => [
+        { icon: "salary", text: `Loon van ${s.employer}: ${s.salary}` },
+        { icon: "balance", text: `Saldo nu: ${s.balance}` },
+        { icon: "muted", text: "Marketing gedempt voor 72 u" },
+        { icon: "clean", text: "Geen lopende klachten of claims" },
+      ],
+      fr: (s) => [
+        { icon: "salary", text: `Salaire de ${s.employer} : ${s.salary}` },
+        { icon: "balance", text: `Solde actuel : ${s.balance}` },
+        { icon: "muted", text: "Marketing coupé pendant 72 h" },
+        { icon: "clean", text: "Aucune plainte ni sinistre en cours" },
+      ],
     },
   },
 };
 
+export const explainSituation = (type: SituationType, matched: Signal[], lang: Lang) => fill(RULES[type].explain[lang], RULES[type].slots(matched, lang));
+export const situationFacts = (type: SituationType, matched: Signal[], lang: Lang) => RULES[type].facts[lang](RULES[type].slots(matched, lang));
+
 export const NOT_USED: Record<Lang, string[]> = {
   en: ["Social media or contacts", "How you type or swipe", "Who you send money to privately", "Location outside a card payment"],
   nl: ["Sociale media of contacten", "Hoe je typt of swipet", "Aan wie je privé geld stuurt", "Locatie buiten een kaartbetaling"],
+  fr: ["Réseaux sociaux ou contacts", "Votre façon de taper ou de glisser", "À qui vous envoyez de l'argent en privé", "Votre position en dehors d'un paiement par carte"],
 };

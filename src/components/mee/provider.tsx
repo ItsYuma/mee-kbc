@@ -1,12 +1,26 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { Channel, Lang, MeeCommand, MeeState, SignalInput } from "@/domain/types";
+import { LANGS, type Lang, type MeeCommand, type MeeState, type SignalInput } from "@/domain/types";
+import type { TtsInput } from "@/server/parse";
 
 type Action = Exclude<MeeCommand, { kind: "signal" } | { kind: "tick" }>;
 
 export type VoiceStatus = { key: string; phase: "loading" | "playing" } | null;
 export type VoiceMode = "elevenlabs" | "mock" | "unavailable" | "unknown";
+
+export const SPEECH_LANG: Record<Lang, string> = { fr: "fr-BE", nl: "nl-BE", en: "en-GB" };
+
+export function voiceKey(req: TtsInput): string {
+  switch (req.kind) {
+    case "situation":
+      return `situation:${req.situationId}:${req.channel}`;
+    case "turn":
+      return `turn:${req.turnId}`;
+    case "classic_ivr":
+      return "classic_ivr";
+  }
+}
 
 type MeeCtx = {
   state: MeeState | null;
@@ -16,8 +30,8 @@ type MeeCtx = {
   setLang: (l: Lang) => void;
   fire: (signal: SignalInput) => Promise<void>;
   act: (action: Action) => Promise<void>;
-  speak: (situationId: string, channel: Channel) => Promise<void>;
-  speakOnce: (situationId: string, channel: Channel) => void;
+  speak: (req: TtsInput) => void;
+  speakOnce: (req: TtsInput, opts?: { interrupt?: boolean }) => void;
   voice: VoiceStatus;
   voiceMode: VoiceMode;
 };
@@ -37,25 +51,29 @@ async function post(url: string, body: unknown): Promise<MeeState> {
 }
 
 const LANG_KEY = "mee-lang";
+const DEFAULT_LANG: Lang = "fr";
 const langListeners = new Set<() => void>();
 const subscribeLang = (fn: () => void) => {
   langListeners.add(fn);
   return () => langListeners.delete(fn);
 };
-const readLang = (): Lang => (localStorage.getItem(LANG_KEY) === "nl" ? "nl" : "en");
+const readLang = (): Lang => LANGS.find((l) => l === localStorage.getItem(LANG_KEY)) ?? DEFAULT_LANG;
 
 export function MeeProvider({ children }: { children: React.ReactNode }) {
   const [snap, setSnap] = useState<{ state: MeeState; at: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const lang = useSyncExternalStore(subscribeLang, readLang, () => "en" as const);
+  const lang = useSyncExternalStore(subscribeLang, readLang, () => DEFAULT_LANG);
   const [voice, setVoice] = useState<VoiceStatus>(null);
   const [voiceMode, setVoiceMode] = useState<VoiceMode>("unknown");
-  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const setLang = useCallback((l: Lang) => {
     localStorage.setItem(LANG_KEY, l);
     langListeners.forEach((fn) => fn());
   }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
 
   useEffect(() => {
     let alive = true;
@@ -93,67 +111,99 @@ export function MeeProvider({ children }: { children: React.ReactNode }) {
   const fire = useCallback((signal: SignalInput) => run(post("/api/events", signal)), [run]);
   const act = useCallback((action: Action) => run(post("/api/actions", action)), [run]);
 
-  const speak = useCallback(
-    async (situationId: string, channel: Channel) => {
-      const key = `${situationId}:${channel}`;
-      audioRef.current?.pause();
-      window.speechSynthesis?.cancel();
-      setVoice({ key, phase: "loading" });
-      const done = () => setVoice((v) => (v?.key === key ? null : v));
-      try {
-        const res = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ situationId, channel, lang }),
-        });
-        if (!res.ok) throw new Error(`tts ${res.status}`);
-        if (res.headers.get("Content-Type")?.startsWith("audio/")) {
-          setVoiceMode("elevenlabs");
-          const audio = new Audio(URL.createObjectURL(await res.blob()));
-          audioRef.current = audio;
-          audio.onended = done;
-          audio.onerror = done;
-          setVoice({ key, phase: "playing" });
-          await audio.play();
-          act({ kind: "voice_played", situationId, channel });
-        } else {
-          const { text } = (await res.json()) as { text: string };
+  const stopCurrent = useRef<() => void>(() => {});
+  const queue = useRef<TtsInput[]>([]);
+  const pumping = useRef(false);
+
+  const play = useCallback(
+    (req: TtsInput) =>
+      new Promise<void>((resolve) => {
+        const key = voiceKey(req);
+        let settled = false;
+        let audio: HTMLAudioElement | null = null;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          audio?.pause();
+          setVoice((v) => (v?.key === key ? null : v));
+          resolve();
+        };
+        stopCurrent.current = () => {
+          window.speechSynthesis?.cancel();
+          done();
+        };
+        const played = () => {
+          if (req.kind === "situation") act({ kind: "voice_played", situationId: req.situationId, channel: req.channel });
+        };
+        setVoice({ key, phase: "loading" });
+
+        (async () => {
+          const res = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) });
+          if (!res.ok) throw new Error(`tts ${res.status}`);
+          if (settled) return;
+          if (res.headers.get("Content-Type")?.startsWith("audio/")) {
+            setVoiceMode("elevenlabs");
+            audio = new Audio(URL.createObjectURL(await res.blob()));
+            audio.onended = done;
+            audio.onerror = done;
+            setVoice({ key, phase: "playing" });
+            await audio.play();
+            played();
+            return;
+          }
+          const { text, lang: scriptLang } = (await res.json()) as { text: string; lang: Lang };
           if (!("speechSynthesis" in window)) {
             setVoiceMode("unavailable");
             return done();
           }
           const u = new SpeechSynthesisUtterance(text);
-          u.lang = lang === "nl" ? "nl-BE" : "en-GB";
+          u.lang = SPEECH_LANG[scriptLang];
           u.rate = 1.02;
           u.onstart = () => {
             setVoiceMode("mock");
             setVoice({ key, phase: "playing" });
-            act({ kind: "voice_played", situationId, channel });
+            played();
             // Some browsers never fire onend, so the playing state also ends on a length-based timer.
-            setTimeout(done, 1500 + text.length * 60);
+            setTimeout(done, 1500 + text.length * 65);
           };
           u.onend = done;
-          u.onerror = () => {
-            setVoiceMode("unavailable");
+          u.onerror = (e) => {
+            if (e.error !== "interrupted" && e.error !== "canceled") setVoiceMode("unavailable");
             done();
           };
           window.speechSynthesis.speak(u);
-        }
-      } catch {
-        done();
-      }
-    },
-    [lang, act],
+        })().catch(done);
+      }),
+    [act],
   );
 
-  const autoplayed = useRef(new Set<string>());
-  const speakOnce = useCallback(
-    (situationId: string, channel: Channel) => {
-      if (autoplayed.current.has(situationId)) return;
-      autoplayed.current.add(situationId);
-      speak(situationId, channel);
+  const pump = useCallback(async () => {
+    if (pumping.current) return;
+    pumping.current = true;
+    while (queue.current.length) await play(queue.current.shift()!);
+    pumping.current = false;
+  }, [play]);
+
+  const speak = useCallback(
+    (req: TtsInput) => {
+      queue.current = [req];
+      stopCurrent.current();
+      pump();
     },
-    [speak],
+    [pump],
+  );
+
+  const seen = useRef(new Set<string>());
+  const speakOnce = useCallback(
+    (req: TtsInput, opts?: { interrupt?: boolean }) => {
+      const key = voiceKey(req);
+      if (seen.current.has(key)) return;
+      seen.current.add(key);
+      if (opts?.interrupt) return speak(req);
+      queue.current.push(req);
+      pump();
+    },
+    [pump, speak],
   );
 
   return (
