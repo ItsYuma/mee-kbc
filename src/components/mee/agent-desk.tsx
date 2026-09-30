@@ -1,23 +1,31 @@
 "use client";
 
-import { Ban, CheckCircle2, Clock, Headphones, MessageSquareQuote, Phone, Radio, ShieldCheck, UserRound } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { useEffect } from "react";
+import {
+  AlertTriangle, Ban, Banknote, BellOff, CheckCircle2, ChevronDown, Clock, CreditCard, Euro, Hash, Headphones, ListChecks, MapPin, Phone, ShieldCheck, Smartphone, Sparkles, Store, Wallet,
+  type LucideIcon,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { agentSituation } from "@/domain/engine";
-import { PLAYBOOKS, SITUATION_LABEL } from "@/domain/playbooks";
-import { RULES } from "@/domain/rules";
-import type { SituationStatus, TimelineEntry } from "@/domain/types";
-import { fmtEur, fmtTime, fmtUntil } from "./copy";
+import { activeSituation, agentScript, callSituation, liveCall, situationSlots } from "@/domain/engine";
+import { APP_PLAYBOOKS, SITUATION_LABEL } from "@/domain/playbooks";
+import { RULES, fill, situationFacts, type FactIcon } from "@/domain/rules";
+import type { Call, MeeState, Situation, TimelineEntry } from "@/domain/types";
+import { Transcript } from "./call-screen";
+import { COPY, fmtAgo, fmtClock, fmtTime } from "./copy";
 import { useMee } from "./provider";
 import { VoiceButton } from "./voice-button";
 
-const STATUS_STYLE: Record<SituationStatus, string> = {
-  active: "bg-mee-strong text-white",
-  resolved: "bg-emerald-600 text-white",
-  dismissed: "bg-muted text-muted-foreground",
-  suppressed: "bg-muted text-muted-foreground",
-  expired: "bg-muted text-muted-foreground",
+const FACT_ICON: Record<FactIcon, LucideIcon> = {
+  place: MapPin,
+  card: CreditCard,
+  merchant: Store,
+  amount: Euro,
+  code: Hash,
+  salary: Banknote,
+  balance: Wallet,
+  muted: BellOff,
+  clean: ShieldCheck,
 };
 
 const KIND_STYLE: Record<TimelineEntry["kind"], string> = {
@@ -28,114 +36,172 @@ const KIND_STYLE: Record<TimelineEntry["kind"], string> = {
 };
 
 export function AgentDesk() {
-  const { state, lang, act } = useMee();
-  if (!state) return <div className="h-full animate-pulse rounded-2xl bg-muted" />;
+  const { state } = useMee();
+  if (!state) return <div className="h-64 animate-pulse rounded-2xl bg-muted" />;
 
-  const sit = agentSituation(state);
-  const call = state.supportCall;
-  const nl = lang === "nl";
+  const call = liveCall(state);
+  const sit = callSituation(state);
+  if (call && sit && call.phase === "with_agent") return <HandedOff state={state} call={call} situation={sit} />;
+  if (call && sit) return <MeeOnLine call={call} situation={sit} />;
+  return <Waiting state={state} />;
+}
+
+function Waiting({ state }: { state: MeeState }) {
+  const { lang, now } = useMee();
+  const t = COPY[lang].agent;
+  const sit = state.prefs.meePaused ? undefined : activeSituation(state);
+  const last = state.call;
+  const lastSit = last && state.situations.find((s) => s.id === last.situationId);
+  const lastLine = last && lastSit && (lastSit.status !== "resolved" ? t.lastCallOther : last.handedOffAt ? t.lastCallAgent : t.lastCallMee);
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className={cn("flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3", call ? "border-emerald-300 bg-emerald-50" : "bg-card")}>
-        <span className={cn("flex size-10 items-center justify-center rounded-full", call ? "bg-emerald-500 text-white animate-[mee-pulse_1.4s_ease-out_infinite]" : "bg-muted text-muted-foreground")}>
-          {call ? <Phone className="size-4" /> : <Radio className="size-4" />}
-        </span>
+    <div data-testid="agent-waiting" className="flex flex-col items-center gap-3 rounded-2xl border border-dashed bg-card px-6 py-12 text-center">
+      <span className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground"><Headphones className="size-5" /></span>
+      <p className="text-base font-semibold">{t.waiting}</p>
+      <p className="max-w-md text-sm text-muted-foreground">
+        {sit ? t.knows(SITUATION_LABEL[sit.type][lang], RULES[sit.type].name.split(" · ")[0], fmtAgo(now - sit.createdAt, lang)) : t.knowsNothing}
+      </p>
+      {lastLine && (
+        <p className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800">
+          <CheckCircle2 className="size-3.5" /> {lastLine}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function MeeOnLine({ call, situation }: { call: Call; situation: Situation }) {
+  const { lang, now } = useMee();
+  const t = COPY[lang].agent;
+  return (
+    <div data-testid="agent-mee-on-line" className="flex flex-col gap-4">
+      <div className="flex items-center gap-3 rounded-2xl border border-mee/40 bg-mee-soft px-4 py-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-mee text-white animate-[mee-pulse_1.4s_ease-out_infinite]"><Sparkles className="size-4" /></span>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold">
-            {call ? (nl ? "Inkomend gesprek · Lotte Peeters" : "Incoming call · Lotte Peeters") : nl ? "Geen gesprek · situatiebus live" : "No call · situation bus live"}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {call
-              ? `${nl ? "Verbonden om" : "Connected at"} ${fmtTime(call.startedAt, lang)} · ${nl ? "context al geladen" : "context already loaded"}`
-              : nl ? "Zodra de klant belt, opent dit scherm met dezelfde situatie." : "When the customer calls, this screen opens on the same situation."}
-          </p>
+          <p className="text-sm font-semibold">{t.meeOnLine}</p>
+          <p className="text-xs text-muted-foreground">{t.meeOnLineSub}</p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <UserRound className="size-4" />
-          <span>{state.customer.name} · {state.customer.city} · {fmtEur(state.customer.balanceEur, lang)}</span>
+        <span className="font-mono text-xs tabular-nums text-muted-foreground">{fmtClock(now - call.startedAt)}</span>
+      </div>
+      <section className="rounded-2xl border bg-card p-4">
+        <p className="mb-3 text-xs font-semibold tracking-wide text-muted-foreground uppercase">{SITUATION_LABEL[situation.type][lang]}</p>
+        <Transcript call={call} tone="light" className="max-h-[420px]" />
+      </section>
+    </div>
+  );
+}
+
+function HandedOff({ state, call, situation }: { state: MeeState; call: Call; situation: Situation }) {
+  const { lang, now, act, speakOnce } = useMee();
+  const t = COPY[lang].agent;
+  const agent = agentScript(state, situation);
+  const app = APP_PLAYBOOKS[situation.type];
+  const whisper = fill(agent.whisper[lang], situationSlots(state, situation, lang));
+  const facts = situationFacts(situation.type, situation.signals, lang);
+  const active = situation.status === "active";
+  const whisperRequest = { kind: "situation", situationId: situation.id, channel: "agent", lang } as const;
+
+  useEffect(() => {
+    speakOnce({ kind: "situation", situationId: situation.id, channel: "agent", lang });
+  }, [speakOnce, situation.id, lang]);
+
+  return (
+    <div data-testid="agent-handed-off" className="@container flex flex-col gap-4">
+      <div className="flex items-center gap-3 rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white animate-[mee-pulse_1.4s_ease-out_infinite]"><Phone className="size-4" /></span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold">{t.incoming}</p>
+          <p className="text-xs text-muted-foreground">{t.incomingSub}</p>
         </div>
+        <span className="font-mono text-xs tabular-nums text-muted-foreground">{fmtClock(now - (call.handedOffAt ?? call.startedAt))}</span>
       </div>
 
-      {!sit ? (
-        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed bg-card px-6 py-14 text-center">
-          <ShieldCheck className="size-6 text-emerald-600" />
-          <p className="text-sm font-medium">{nl ? "Stil. Geen situaties voor deze klant." : "Quiet. No situations for this customer."}</p>
-          <p className="max-w-sm text-xs text-muted-foreground">
-            {nl ? "Dat is de bedoeling. Mee spreekt pas als een regel echt matcht." : "That's the point. Mee only speaks when a rule really matches."}
-          </p>
-        </div>
-      ) : (
-        <div className="grid gap-4 min-[1440px]:grid-cols-[1.2fr_1fr]">
-          <div className="flex flex-col gap-4">
-            <section className="rounded-2xl border bg-card p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge className={STATUS_STYLE[sit.status]}>{sit.status}</Badge>
-                <h3 className="text-base font-semibold">{SITUATION_LABEL[sit.type][lang]}</h3>
-                <code data-testid="agent-situation-id" className="ml-auto rounded bg-muted px-2 py-0.5 font-mono text-xs">{sit.id}</code>
-              </div>
-              <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                <dt className="text-muted-foreground">{nl ? "Regel" : "Rule"}</dt><dd className="font-mono">{RULES[sit.type].name}</dd>
-                <dt className="text-muted-foreground">{nl ? "Geopend" : "Opened"}</dt><dd>{fmtTime(sit.createdAt, lang)}</dd>
-                <dt className="text-muted-foreground">{nl ? "Verloopt" : "Expires"}</dt><dd>{fmtUntil(sit.expiresAt, lang)}</dd>
-              </dl>
-              <p className="mt-3 rounded-lg bg-muted/60 p-3 text-sm leading-relaxed">{RULES[sit.type].explain(sit.signals, lang)}</p>
-            </section>
-
-            <section className="@container rounded-2xl border bg-card p-4">
-              <h4 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                <Ban className="size-3.5" /> {nl ? "Al bekend · niet opnieuw vragen" : "Already known · don't re-ask"}
-              </h4>
-              <ul className="mt-2 grid gap-1.5 @min-[22rem]:grid-cols-2">
-                {RULES[sit.type].knownFacts(sit.signals, lang).map((f) => (
-                  <li key={f} className="flex items-start gap-2 text-sm"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" />{f}</li>
-                ))}
-              </ul>
-            </section>
-
-            <section className="rounded-2xl border bg-card p-4">
-              <h4 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                <MessageSquareQuote className="size-3.5" /> {nl ? "Readback · exact wat de klant zag" : "Readback · exactly what the customer saw"}
-              </h4>
-              <blockquote data-testid="agent-readback" className="mt-2 border-l-2 border-mee pl-3 text-[15px] leading-relaxed">
-                {PLAYBOOKS[sit.type].app.scriptText[lang]}
-              </blockquote>
-              <VoiceButton situationId={sit.id} channel="app" label={nl ? "Lees voor aan klant" : "Read back to customer"} className="mt-3" />
-            </section>
-
-            <section className="rounded-2xl border border-violet-200 bg-violet-50/60 p-4">
-              <h4 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-violet-700 uppercase">
-                <Headphones className="size-3.5" /> {nl ? "Whisper · enkel voor de agent" : "Whisper · agent ear only"}
-              </h4>
-              <p className="mt-2 text-sm leading-relaxed">{PLAYBOOKS[sit.type].agent.scriptText[lang]}</p>
-              <p className="mt-1 font-mono text-[11px] text-muted-foreground">{PLAYBOOKS[sit.type].agent.version}</p>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                <VoiceButton situationId={sit.id} channel="agent" label={nl ? "Speel whisper" : "Play whisper"} />
-                <Button disabled={sit.status !== "active"} onClick={() => act({ kind: "cta", situationId: sit.id, action: "agent_resolve" })}>
-                  <CheckCircle2 /> {PLAYBOOKS[sit.type].agent.ctaLabel[lang]}
+      <div className="grid gap-4 @min-[56rem]:grid-cols-2">
+        <div className="flex flex-col gap-4">
+          <article data-testid="agent-situation-card" className="overflow-hidden rounded-2xl border bg-card shadow-sm">
+            <header className={cn("flex items-center gap-2 px-4 py-3 text-white", app.urgency === "time_critical" ? "bg-gradient-to-r from-red-600 to-orange-500" : "bg-gradient-to-r from-amber-500 to-orange-400")}>
+              <AlertTriangle className="size-5 shrink-0" />
+              <h3 className="min-w-0 flex-1 text-lg leading-tight font-semibold">{SITUATION_LABEL[situation.type][lang]}</h3>
+              {!active && <span className="rounded-full bg-white/25 px-2 py-0.5 text-xs font-medium">{t.resolved}</span>}
+            </header>
+            <ul className="flex flex-col divide-y">
+              {facts.map((f) => {
+                const Icon = FACT_ICON[f.icon];
+                return (
+                  <li key={f.text} className="flex items-center gap-3 px-4 py-2.5 text-[15px]">
+                    <Icon className="size-4 shrink-0 text-muted-foreground" /> {f.text}
+                  </li>
+                );
+              })}
+              <li className="flex items-start gap-3 bg-mee-soft/60 px-4 py-2.5 text-[15px]">
+                <ListChecks className="mt-0.5 size-4 shrink-0 text-mee-strong" />
+                <span><span className="font-semibold">{t.recommended}</span> {agent.recommended[lang]}</span>
+              </li>
+              <li className="flex items-center gap-3 px-4 py-2 text-xs text-muted-foreground">
+                <Clock className="size-3.5 shrink-0" /> {t.detected(fmtAgo(now - situation.createdAt, lang))} · <span className="font-mono">{RULES[situation.type].name.split(" · ")[0]}</span>
+              </li>
+            </ul>
+            <div className="border-t p-3">
+              {active ? (
+                <Button data-testid="agent-resolve" size="lg" className="h-11 w-full text-sm" onClick={() => act({ kind: "cta", situationId: situation.id, action: "agent_resolve", lang })}>
+                  <CheckCircle2 /> {agent.ctaLabel[lang]}
                 </Button>
-              </div>
-            </section>
-          </div>
+              ) : (
+                <Button size="lg" variant="outline" className="h-11 w-full text-sm" onClick={() => act({ kind: "end_call", callId: call.id })}>
+                  <CheckCircle2 /> {t.closeCall}
+                </Button>
+              )}
+            </div>
+          </article>
+
+          <section className="rounded-2xl border border-violet-200 bg-violet-50/60 p-4">
+            <h4 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-violet-700 uppercase"><Headphones className="size-3.5" /> {t.say}</h4>
+            <p data-testid="agent-whisper" className="mt-2 text-[15px] leading-relaxed">{whisper}</p>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <VoiceButton request={whisperRequest} label={t.replay} showMode={false} />
+              <span className="font-mono text-[11px] text-muted-foreground">{agent.version}</span>
+            </div>
+          </section>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <section className="rounded-2xl border bg-card p-4">
+            <h4 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase"><Ban className="size-3.5" /> {t.dontAsk}</h4>
+            <ul data-testid="agent-dont-ask" className="mt-2 flex flex-wrap gap-1.5">
+              {facts.flatMap((f) => {
+                const topic = t.topics[f.icon];
+                return topic ? [<li key={f.icon} className="flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-sm"><CheckCircle2 className="size-3.5 text-emerald-600" />{topic}</li>] : [];
+              })}
+            </ul>
+          </section>
 
           <section className="rounded-2xl border bg-card p-4">
-            <h4 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-              <Clock className="size-3.5" /> {nl ? "Tijdlijn · één geheugen, alle kanalen" : "Timeline · one memory, every channel"}
-            </h4>
+            <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{t.sawHeard}</h4>
+            <p className="mt-3 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground"><Smartphone className="size-3.5" /> {t.inApp}</p>
+            <blockquote data-testid="agent-readback" className="mt-1 border-l-2 border-mee pl-3 text-sm leading-relaxed">{app.scriptText[lang]}</blockquote>
+            <p className="mt-4 mb-2 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground"><Phone className="size-3.5" /> {t.onCall}</p>
+            <Transcript call={call} tone="light" className="max-h-72" />
+          </section>
+
+          <details className="group rounded-2xl border bg-card p-4">
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+              <Clock className="size-3.5" /> {t.history}
+              <ChevronDown className="ml-auto size-4 transition-transform group-open:rotate-180" />
+            </summary>
             <ol className="mt-3 flex flex-col gap-3">
-              {[...state.timeline].reverse().slice(0, 40).map((e) => (
-                <li key={e.id} className={cn("flex gap-3 text-sm", e.situationId && e.situationId !== sit.id && "opacity-50")}>
+              {[...state.timeline].reverse().filter((e) => !e.situationId || e.situationId === situation.id).slice(0, 30).map((e) => (
+                <li key={e.id} className="flex gap-3 text-sm">
                   <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", KIND_STYLE[e.kind])} />
                   <div className="min-w-0">
                     <p className="leading-snug">{e.text[lang]}</p>
-                    <p className="font-mono text-[11px] text-muted-foreground">{fmtTime(e.at, lang)} · {e.kind}</p>
+                    <p className="font-mono text-[11px] text-muted-foreground">{fmtTime(e.at, lang)}</p>
                   </div>
                 </li>
               ))}
             </ol>
-          </section>
+          </details>
         </div>
-      )}
+      </div>
     </div>
   );
 }
